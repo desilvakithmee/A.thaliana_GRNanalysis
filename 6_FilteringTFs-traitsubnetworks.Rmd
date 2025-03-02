@@ -1,0 +1,242 @@
+---
+title: "Gene-to-trait"
+date: "2023-03-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/kithmeedesilva/Documents/Arabidopsis_NxLight/")
+
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(psych)
+library(igraph)
+
+```
+
+```{r load data}
+
+# sample trait information
+trait.data <- data.table(read.csv("Data/UIUC.traitdata.csv"))
+
+# network file
+GRN.dt <- read.csv("Output/TF-targetNetworks/mTERFremoved/Network files/MergedFullGRNs_rankProd_pruned0.14.csv")
+
+# experimental design
+exp.design <- read.csv("Data/UIUC.design.csv")
+
+# list of differentially expressed genes
+allDEgenes_models <- read.csv("Output/UIUC-ModelReductionSigGenes-FC-2023.09.07-thresh.1e-06.csv", header = T)
+allDEgenes <- allDEgenes_models$rowname
+
+# Arabidopsis annotation files
+annotation <- read.csv("Data/Gene_annotation.csv")
+# list of transcription factors with annotation
+ath_tfs <- read.csv("Data/Athaliana.TFs.csv")
+
+# Gene-trait correlation file
+geneTrait.cor <- read.csv("Output/TF-targetNetworks/mTERFremoved/Gene-trait-correlation-coefficient.csv", row.names = 1)
+geneTrait.padj <- read.csv("Output/TF-targetNetworks/mTERFremoved/Gene-trait-correlation-padjusted.csv", row.names = 1)
+```
+
+
+
+```{r trait modules}
+# based on trait-trait correlation, picking traits for subnetworks 
+# provide the exact names of the traits here if they were selected before the gene-trait correlation
+subnetwork.traits <- rownames(geneTrait.cor)
+
+# get genes in each subnework at 0.01 padj cutoff
+lapply(subnetwork.traits, function(x){
+  geneTrait.cor[x,][which(geneTrait.padj[x,]<1e-10 & abs(geneTrait.cor[x,])>0.6)] %>% 
+    names}) -> sub.network.genes
+names(sub.network.genes) <- subnetwork.traits
+
+# removing subnetworks with genes less than 50 genes
+sub.network.genes <-  sub.network.genes[which(sapply(sub.network.genes, length) >= 50)]
+subnetwork.traits <- names(sub.network.genes)
+
+```
+
+
+```{r trait subnetworks}
+
+# get TF-Target interactions for subnetworks in the consensus network
+lapply(subnetwork.traits, function(subnet){
+  GRN.dt[GRN.dt$Target %in% sub.network.genes[[subnet]],]})->sub.networks
+names(sub.networks) <- subnetwork.traits
+
+# Function to calculate centrality and additional metrics for each TF based on its targets
+calculate_traitmetrics_with_centrality <- function(subnetwork_results, trait_data) {
+  # Initialize an empty list to store additional metrics for each trait
+  additional_metrics_list <- list()
+  
+  # Iterate through each subnetwork (trait) in the subnetwork list
+  for (trait in names(subnetwork_results)) {
+    # Get the subnetwork for the current trait
+    subnetwork_trait_data <- subnetwork_results[[trait]]
+    
+    if (nrow(subnetwork_trait_data) == 0) next  # Skip if the subnetwork is empty
+    
+    # Convert subnetwork to a data.table for efficient calculations
+    subnetwork_trait_data <- as.data.table(subnetwork_trait_data)
+    
+    # Merge the subnetwork with the trait data to get correlation/XGBoost scores for the targets
+    subnetwork_trait_data <- merge(subnetwork_trait_data, trait_data, by.x = "Target", by.y = "Gene", all.x = TRUE)
+    
+    # Create a graph object from the subnetwork
+    g <- graph_from_data_frame(subnetwork_trait_data[, .(TF, Target)], directed = TRUE)
+    
+    # Calculate centrality measures
+    centrality_measures <- data.frame(
+      TF = V(g)$name, 
+      OutDegree = igraph::degree(g, mode = "out")               
+      #Betweenness = igraph::betweenness(g, directed = TRUE),
+      #Eigenvector = eigen_centrality(g)$vector
+    )
+    
+    # Calculate additional metrics for each TF based on its targets
+    # minimum trait value to calculate the Bayes average
+    minTrait <- min(abs(trait_data[trait]),na.rm = TRUE)
+    additional_metrics_trait <- subnetwork_trait_data[, .(
+      BayesAvg = (((mean(abs(.SD[[1]]), na.rm = TRUE) * .N) +  
+                     (minTrait * 10)) /
+                    (.N + 10))                                  
+    ), by = TF, .SDcols = trait]
+    
+    # Merge centrality measures with additional metrics
+    metrics_with_centrality <- merge(additional_metrics_trait, centrality_measures, by = "TF", all.x = TRUE)
+    
+    # Store the metrics for this trait
+    additional_metrics_list[[trait]] <- metrics_with_centrality
+  }
+  
+  return(additional_metrics_list)
+}
+
+```
+
+```{r important tfs}
+# Load the trait table data
+# here all the trait-related measures are based on r-values (e.g. average)
+# Calculate additional metrics with centrality for each trait and module subnetwork
+trait.data <- as.data.frame(t(geneTrait.cor))
+trait.data$Gene <- rownames(trait.data)
+
+# Convert the full network data into a graph object
+full_network_graph <- graph_from_data_frame(GRN.dt[, c("TF", "Target")], directed = TRUE)
+
+# Calculate centrality measures for the full network
+full_network_centrality <- data.frame(
+  TF = V(full_network_graph)$name,
+  OutDegree_FullNetwork = igraph::degree(full_network_graph, mode = "out")               
+)
+
+# Calculate additional metrics with centrality for each trait
+additional_metrics_results <- calculate_traitmetrics_with_centrality(sub.networks, trait.data)
+
+# Initialize the combined results data frame for centrality measures with TFs from the first trait
+combined_top_tfs <- data.frame(TF = additional_metrics_results[[1]]$TF)  # Initialize with just the TF column
+
+# Iterate over each trait and merge its additional metrics into the combined table
+for (trait in names(additional_metrics_results)) {
+  additional_metrics <- additional_metrics_results[[trait]]
+  
+  # Rename the columns to include the trait name as a suffix (except for TF)
+  colnames(additional_metrics)[-1] <- paste0(colnames(additional_metrics)[-1], "_", trait)
+  
+  # Merge the additional metrics for this trait into the combined results by TF
+  combined_top_tfs <- left_join(combined_top_tfs, additional_metrics, by = "TF")
+}
+
+# Add full network centrality measures to the combined_top_tfs table
+full_network_centrality_common <- full_network_centrality[full_network_centrality$TF %in% combined_top_tfs$TF, ]
+
+combined_top_tfs <- left_join( full_network_centrality[full_network_centrality$OutDegree_FullNetwork != 0,],
+                               combined_top_tfs, by = "TF")
+
+# TF overlap
+subnetwork_enrichment <- function(subnetwork_results) {
+  for (i in seq_along(subnetwork_results)) {
+    subnetwork_name <- names(subnetwork_results)[i]  # Get the name of the current subnetwork
+  
+    # Calculate p-values for each TF in the current subnetwork
+    p_values <- sapply(combined_top_tfs$TF, function(tf) {
+        # Total number of targets in the full network for the current TF
+        m <- sum(GRN.dt$TF == tf)
+        # Total number of targets in the full network minus the TF's targets
+        n <- nrow(GRN.dt) - m
+        # Total number of genes in the current subnetwork
+        k <- nrow(subnetwork_results[[i]])
+        # Number of times the TF appears in the current subnetwork
+        x <- sum(subnetwork_results[[i]]$TF == tf)
+        
+      # Hypergeometric test to compute p-value
+      if (m > 0 && k > 0) {
+        phyper(x - 1, m, n, k, lower.tail = FALSE)
+      } else {
+        NA  # Return NA if the TF does not appear in the full network or subnetwork
+      }
+    })
+    
+    # Apply FDR correction to the p-values for the current subnetwork
+    fdr_values <- p.adjust(p_values, method = "fdr")
+    
+    # Add the FDR-corrected p-values as a new column for the current subnetwork
+    combined_top_tfs[[paste0("FDR_", subnetwork_name)]] <- fdr_values
+  }
+  return(combined_top_tfs)
+}
+
+combined_top_tfs <- subnetwork_enrichment(sub.networks)
+
+```
+
+```{r compiling results}
+
+# adding annotation details for TFs
+combined_top_tfs$Model = allDEgenes_models$Model[match(combined_top_tfs$TF,allDEgenes_models$rowname)]
+combined_top_tfs$Ath.Gene.name = annotation$Gene.symbol[match(combined_top_tfs$TF,annotation$Gene_ID)]
+combined_top_tfs$Ath.Gene.symbol = annotation$Gene.symbol.shorten[match(combined_top_tfs$TF,annotation$Gene_ID)]
+combined_top_tfs$TF.family = ath_tfs$Matt[match(combined_top_tfs$TF,ath_tfs$GeneID)]
+combined_top_tfs %>% relocate(names(combined_top_tfs)[15:18], .after = "TF") -> combined_top_tfs
+
+# select the top k for filtering
+k <- 20
+filteredTFList <- combined_top_tfs
+#replace values with rank
+cols <- grepl(paste(c("BayesAvg","OutDegree"), collapse='|'),names(filteredTFList))
+filteredTFList[,cols] <- apply(filteredTFList[,cols], 2, function(x) {
+  ranks <- rank(-x, ties.method = "min")  # Rank in descending order
+  ranks[ranks > k] <- NA  # Set values outside top k to NA
+  #ranks[!is.na(ranks)] <- 1  # change the ranks to 1
+  # Convert ranks to a weighted score (e.g., inverse of the rank for weighting)
+  weighted_ranks <- ifelse(is.na(ranks), NA, 1 / ranks)
+  return(weighted_ranks)
+  })
+
+# for FDR the ranks have to be in ascending order
+cols <- grep("FDR",names(filteredTFList))
+filteredTFList[,cols] <- apply(filteredTFList[,cols], 2, function(x) {
+  ranks <- rank(x, ties.method = "min")  # Rank in descending order
+  ranks[ranks > k] <- NA  # Set values outside top k to NA
+  #ranks[!is.na(ranks)] <- 1 # change the ranks to 1
+  # Convert ranks to a weighted score (e.g., inverse of the rank for weighting)
+  weighted_ranks <- ifelse(is.na(ranks), NA, 1 / ranks)
+  return(weighted_ranks)
+  })
+
+filteredTFList$Sum <- rowSums(filteredTFList[,6:17], na.rm = T)
+filteredTFList <- filteredTFList[filteredTFList$Sum != 0,]
+filteredTFList %>% relocate("Sum", .after = "TF.family") -> filteredTFList
+
+# save TF lists
+# write.csv(filteredTFList,"Output/TF-targetNetworks/mTERFremoved/SignificantTFList-DEGcorrelation-top20TFs-IntersectionConsensus-FullNetworkPruned_Feb262025.csv", row.names = F, quote = T)
+# write.csv(combined_top_tfs,"Output/TF-targetNetworks/Subnetwork-hubTFlists/UIUC.Significanthubs-DEGcorrelation-top20TFs-IntersectionConsensus-FullNetworkPruned-withdetails_Feb142025.csv", row.names = F, quote = T)
+
+```
+
+
+

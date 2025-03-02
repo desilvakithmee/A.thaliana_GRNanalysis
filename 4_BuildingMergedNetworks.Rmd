@@ -1,0 +1,207 @@
+---
+title: "Arabidopsis NxL GRN construction: merging networks"
+author: "Kithmee de Silva"
+date: "2025-02-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/kithmeedesilva/Documents/Arabidopsis_NxLight/")
+
+library(tidyverse)
+library(GENIE3)
+library(data.table)
+library(BioNERO)
+
+```
+
+
+```{r}
+# === 01 - Intersection Consensus : using full inferred GRNs ===
+
+# Keeping only the edges present in multiple networks (i.e. at least 3 out of 5)
+# Using full networks - so will have different no of edges, also different ranges for scores
+
+# List of networks: using the full/unfiltered networks
+grnfiles <- list.files("Output/TF-targetNetworks/mTERFremoved/", pattern = "normCounts")
+grnfiles <- paste0("Output/TF-targetNetworks/mTERFremoved/",grnfiles)
+
+network_list <- list()
+# Read each GRN file and store in network_list
+for (num in 1:length(grnfiles)) {
+  tmp <- read.csv(grnfiles[num])
+  tmp$Rank <- rank(-tmp[,3], ties.method = "min")  # - for descending order
+  network_list[num] <- list(tmp)
+}
+names(network_list) <- c("ARACNE","CLR","GENIE3","OP3")
+
+# Convert edges to character format for easy comparison
+edge_sets <- lapply(network_list, function(df) paste(df[[1]], df[[2]], sep = "->"))
+
+# Count how many networks contain each edge
+edge_counts <- table(unlist(edge_sets))
+
+# Stringent consensus: Edges appearing in at least 3 networks
+stringent_consensus_edges <- names(edge_counts[edge_counts >= 3])
+
+# Convert back to data frame format
+stringent_consensus_network <- do.call(rbind, strsplit(stringent_consensus_edges, "->")) %>% as.data.frame()
+colnames(stringent_consensus_network) <- c("TF", "Target")
+
+# Summary statistics
+cat("=== Intersection Approach ===", "\n")
+cat("Total edges:", nrow(stringent_consensus_network), "\n")
+cat("Total genes:", length(unique(stringent_consensus_network$Target)), "\n")
+cat("Total TFs:", length(unique(stringent_consensus_network$TF)), "\n")
+
+write.csv(stringent_consensus_network,
+          "Output/TF-targetNetworks/mTERFremoved/IntersectionConsensusNetwork-nopriorGRNs-fullnetworks.csv",
+          row.names = F, quote = F)
+```
+
+
+```{r}
+# Add rank product column
+rank_product_list <- list()
+
+#threshold for connecTF
+edge <- 100000
+
+for (net_name in names(network_list)) {
+  df <- network_list[[net_name]]
+  edge_rank_map <- setNames(df$Rank, paste(df[[1]], df[[2]], sep = "->"))  # Create mapping of edge to rank
+  
+  # Extract ranks for consensus edges
+  ranks <- edge_rank_map[stringent_consensus_edges]
+  ranks[is.na(ranks)] <- max(df$Rank, na.rm = TRUE)  # Assign max rank if edge is missing
+  rank_product_list[[net_name]] <- ranks
+}
+
+# Compute rank product across networks
+rank_product_df <- do.call(cbind, rank_product_list)
+stringent_consensus_network$Rank_Sum <- apply(rank_product_df, 1, sum, na.rm = TRUE)
+stringent_consensus_network$Rank_Product <- apply(rank_product_df, 1, prod, na.rm = TRUE)
+
+#sorting by rank product
+stringent_consensus_network <- stringent_consensus_network[order(stringent_consensus_network$Rank_Product, decreasing = F),]
+  
+#saving for ConnecTF
+netout <- stringent_consensus_network[1:edge,1:2]
+netout$edge <- 1
+netout <- netout[,c(1,3,2)]
+names(netout) <- c("source","edge","target")
+
+# Summary statistics
+cat("=== Intersection Approach - Rank product: after filtering top edges ===", "\n")
+cat("Total edges:", nrow(netout), "\n")
+cat("Total genes:", length(unique(netout$target)), "\n")
+cat("Total TFs:", length(unique(netout$source)), "\n")
+
+write.table(netout,"Output/TF-targetNetworks/mTERFremoved/ConnecTF_ConsensusNetwork-apriorGRNs-fullnetwork-top100kfiltered_rankProd.txt", quote = F, row.names = F, sep=" ")
+
+#sorting by rank sum
+stringent_consensus_network <- stringent_consensus_network[order(stringent_consensus_network$Rank_Sum, decreasing = F),]
+  
+#saving for ConnecTF
+netout <- stringent_consensus_network[1:edge,1:2]
+netout$edge <- 1
+netout <- netout[,c(1,3,2)]
+names(netout) <- c("source","edge","target")
+
+# Summary statistics
+cat("=== Intersection Approach - rank sum: after filtering top edges ===", "\n")
+cat("Total edges:", nrow(netout), "\n")
+cat("Total genes:", length(unique(netout$target)), "\n")
+cat("Total TFs:", length(unique(netout$source)), "\n")
+
+write.table(netout,"Output/TF-targetNetworks/mTERFremoved/ConnecTF_ConsensusNetwork-apriorGRNs-fullnetwork-top100kfiltered_rankSum.txt", quote = F, row.names = F, sep=" ")
+```
+
+
+```{r}
+# === comparing the individual networks ===
+
+# list of the networks to be compared
+names(network_list)
+
+# Convert each network into a character vector of "TF->Target" edges
+edge_sets <- lapply(network_list, function(df) paste(df[[1]], df[[2]], sep = "->"))
+
+# Find total unique edges across all networks
+all_edges <- unique(unlist(edge_sets))
+
+# Count how many networks contain each edge
+edge_counts <- table(unlist(edge_sets))
+
+# Summary statistics
+cat("Total unique edges across networks:", length(all_edges), "\n")
+cat("Edges present in all networks:", sum(edge_counts == length(network_list)), "\n")
+
+# shared edge proportions
+ggvenn::ggvenn(edge_sets)
+
+# Compute pairwise Jaccard similarity between networks
+jaccard_similarity <- function(set1, set2) {
+  length(intersect(set1, set2)) / length(union(set1, set2))
+}
+
+pairwise_jaccard <- outer(names(edge_sets), names(edge_sets), Vectorize(function(x, y) {
+  if (x == y) return(1)
+  jaccard_similarity(edge_sets[[x]], edge_sets[[y]])
+}))
+
+# Convert to matrix format
+rownames(pairwise_jaccard) <- colnames(pairwise_jaccard) <- names(edge_sets)
+
+# Display Jaccard similarity matrix
+print(pairwise_jaccard)
+
+# top 5 most connected TFs in each network
+hubTFs <- lapply(GRN.dt, function(df) get_hubs_grn(df, top_n = 100)$Gene)
+
+# overlap of TFs - how many of the TFs are common
+overlapMat <- outer(hubTFs,hubTFs, Vectorize(intersect)) 
+overlapMat[] <- lapply(overlapMat, length)
+overlapMat
+DEGmat <- ComplexHeatmap::make_comb_mat(hubTFs)
+ComplexHeatmap::UpSet(DEGmat,
+                      bg_pt_col = "lightgray", bg_col = "gray94", lwd = 3,
+                      top_annotation = upset_top_annotation(DEGmat, add_numbers = TRUE,
+                                            axis_param = list(gp = gpar(fontsize = 16)),
+                                            show_annotation_name = F),
+                      left_annotation = upset_left_annotation(DEGmat, 
+                                              gp = gpar(fill = "darkolivegreen"),
+                                              add_numbers = T,
+                                              axis_param = list(gp = gpar(fontsize = 14)),
+                                              show_annotation_name = F),
+                      row_names_gp = gpar(fontsize = 12))
+
+
+# Compute precision and recall between networks
+f1_score <- function(set1, set2) {
+  # Precision = True Positives / (True Positives + False Positives)
+  precision <- length(intersect(set1, set2)) / length(set2)
+
+  # Recall = True Positives / (True Positives + False Negatives)
+  recall <- length(intersect(set1, set2)) / length(set1)
+  # F1-score = 2 * (Precision * Recall) / (Precision + Recall)
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+  
+  return(f1_score)
+}
+
+pairwise_f1 <- outer(names(edge_sets), names(edge_sets), Vectorize(function(x, y) {
+  if (x == y) return(1)
+  f1_score(edge_sets[[x]], edge_sets[[y]])
+}))
+
+# Convert to matrix format
+rownames(pairwise_f1) <- colnames(pairwise_f1) <- names(edge_sets)
+
+# Display Jaccard similarity matrix
+print(pairwise_f1)
+
+```
+
+

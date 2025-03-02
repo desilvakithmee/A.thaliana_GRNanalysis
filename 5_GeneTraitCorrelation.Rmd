@@ -1,0 +1,214 @@
+---
+title: "Gene-to-trait"
+date: "2023-03-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/kithmeedesilva/Documents/Arabidopsis_NxLight/")
+
+library(dplyr)
+library(data.table)
+library(psych)
+library(ComplexHeatmap)
+library(topGO)
+library(org.At.tair.db)
+
+```
+
+```{r load data}
+# normalized expression counts
+normcounts_allsamples <- read.csv("Data/UIUC.normalizedCounts.filtered.csv", row.names = 1)
+
+# sample trait information
+trait.data <- data.table(read.csv("Data/UIUC.traitdata.csv"))
+
+# network file
+GRN.dt <- read.csv("Output/TF-targetNetworks/mTERFremoved/MergedFullGRNs_rankSum_pruned0.15.csv")
+
+# experimental design
+exp.design <- read.csv("Data/UIUC.design.csv")
+
+# list of differentially expressed genes
+allDEgenes_models <- read.csv("Output/UIUC-ModelReductionSigGenes-FC-2023.09.07-thresh.1e-06.csv", header = T)
+allDEgenes <- allDEgenes_models$rowname
+
+# Arabidopsis annotation files
+annotation <- read.csv("Data/Gene_annotation.csv")
+# list of transcription factors with annotation
+ath_tfs <- read.csv("Data/Athaliana.TFs.csv")
+
+```
+
+
+```{r picking traits}
+# filter counts for DE genes 
+normcounts_allsamples[allDEgenes,] -> normcounts_allsamples_DEgenes
+
+# make sure columns of the expression matrix and the rows of the trait file are aligned (both in the same order)
+table(trait.data$unique.id == colnames(normcounts_allsamples_DEgenes))
+# if not aligned
+# trait.data <- trait.data[match(trait.data$unique.id, colnames(normcounts_allsamples_DEgenes))]
+
+# Create data.table from expression data for DE genes, and transpose (genes are columns)
+gene.expr.data <- t(normcounts_allsamples_DEgenes)
+
+# separate trait data into table with treatments and traits
+names(trait.data)[c(1:7)]->key.names
+trait.data[,key.names,with=F] -> cor.key
+trait.data[,!key.names,with=F] -> trait.data
+
+# plot trait-trait correlation
+corr.test(trait.data)$r %>% corrplot::corrplot(type="upper")
+
+# based on trait-trait correlation pick the traits for gene-trait correlation
+# avoid traits that are highly correlated to each other to minimize redundant results
+# this step can be done later when making subnetworks - doing here to speed up the correlation step
+# also adding more traits -> more comparisons in fdr correction (so can get less correlated genes overall)
+trait.data_imp = trait.data[,c(47,53,95,105)]
+
+# plot trait-trait correlation after selecting traits
+corr.test(trait.data_imp)$r %>% corrplot::corrplot(type="upper")
+```
+
+
+```{r gene-trait correlation}
+
+# use psych package to correlate each gene with each trait. Change default multiple testing correction to FDR
+corr.test(trait.data_imp, gene.expr.data, adjust="fdr") -> gene.trait.cor
+
+# Find number of genes in subnetworks at different padj cutoffs
+cor.cutoff.sizes<-apply(gene.trait.cor$p.adj,1,function(x){
+  c("0.01" = length(which(x < 0.01)),
+  "0.05" = length(which(x < 0.05)),
+  "0.001" = length(which(x < 0.001)),
+  "1e-5" = length(which(x < 1e-5)),
+  "1e-10" = length(which(x < 1e-10)),
+  "1e-12" = length(which(x < 1e-12)))
+})
+print(cor.cutoff.sizes)
+
+# save files to use to build trait subnetworks (script 6)
+write.csv(gene.trait.cor$r,"Output/TF-targetNetworks/mTERFremoved/Gene-trait-correlation-coefficient.csv",
+          row.names = T, quote = F)
+write.csv(gene.trait.cor$p.adj,"Output/TF-targetNetworks/mTERFremoved/Gene-trait-correlation-padjusted.csv",
+          row.names = T, quote = F)
+
+```
+
+```{r subnetworks}
+# based on trait-trait correlation, picking traits for subnetworks 
+# provide the exact names of the traits here if they were selected before the gene-trait correlation
+subnetwork.traits <- names(trait.data_imp)
+
+# get genes in each subnework at 0.01 padj cutoff
+lapply(subnetwork.traits, function(x){
+  gene.trait.cor$p.adj[x,][which(gene.trait.cor$p.adj[x,]<1e-10 & abs(gene.trait.cor$r[x,])>0.6)] %>% 
+    names}) -> sub.network.genes
+names(sub.network.genes) <- subnetwork.traits
+
+# removing subnetworks with genes less than 50 genes
+sub.network.genes <-  sub.network.genes[which(sapply(sub.network.genes, length) >= 50)]
+subnetwork.traits <- names(sub.network.genes)
+
+DEGmat <- ComplexHeatmap::make_comb_mat(sub.network.genes)
+comb_sets = lapply(comb_name(DEGmat), function(nm) extract_comb(DEGmat, nm))
+
+ComplexHeatmap::UpSet(DEGmat,
+      bg_pt_col = "lightgray", bg_col = "gray94", lwd = 3,
+      top_annotation = upset_top_annotation(DEGmat, add_numbers = TRUE,
+                                            axis_param = list(gp = gpar(fontsize = 12)),
+                                            show_annotation_name = F),
+      left_annotation = upset_left_annotation(DEGmat, 
+                                              gp = gpar(fill = "steelblue4"),
+                                              add_numbers = T,
+                                              axis_param = list(gp = gpar(fontsize = 12)),
+                                              show_annotation_name = F))
+
+# saving file for supplementary table
+corMat <- merge(reshape2::melt(gene.trait.cor$r, value.name = "Correlation coefficient"),
+                reshape2::melt(gene.trait.cor$p.adj, value.name = "p-adjusted value"),
+                by = c("Var1","Var2"))
+names(corMat)[1:2] <- c("Trait","Gene")
+corMat$Significant[abs(corMat$`Correlation coefficient`)>0.6 & corMat$`p-adjusted value`<1e-10] <- "Yes"
+# write.csv(corMat, "Output/Correlation.genes/SupTable_genetrait.csv", row.names = F, quote = F)
+```
+
+
+```{r topGO analysis}
+# Functional enrichment of subnetwork genes
+
+#preparing a library of gene to GO term for Arabidopsis
+library("biomaRt")
+#collect gene names from biomart
+mart <- biomaRt::useMart(biomart = "plants_mart",
+                         dataset = "athaliana_eg_gene",
+                         host = 'https://plants.ensembl.org')
+# Get ensembl gene ids and GO terms
+GTOGO <- biomaRt::getBM(attributes = c( "ensembl_gene_id",
+                                        "go_id"), mart = mart)
+#Remove blank entries
+GTOGO <- GTOGO[GTOGO$go_id != '',]
+# convert from table format to list format
+geneID2GO <- by(GTOGO$go_id,
+                GTOGO$ensembl_gene_id,
+                function(x) as.character(x))
+
+# Funtion for gene selection
+topDiffGenes <- function(allScore) {
+  return(allScore < 0.01)
+}
+# trait <- "Total.dry.masss"
+for (trait in subnetwork.traits) {
+  allGenes <- rep(1, length(allDEgenes))
+  names(allGenes) <- allDEgenes
+  allGenes[names(allGenes) %in% sub.network.genes[[trait]]] <- 0.001
+
+  #Running topGO analysis
+  sum(topDiffGenes(allGenes)) # number of DEGs against the background
+  GOdata <- new("topGOdata", 
+                      description = "Simple session", ontology = "BP",
+                      allGenes = allGenes, geneSel = topDiffGenes,
+                      nodeSize = 10,
+                      annot = annFUN.gene2GO, gene2GO = geneID2GO)
+  resultFisher <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+  # define test using the weight01 algorithm (default) with fisher
+  weight_fisher_result <- runTest(GOdata, algorithm='weight01', statistic='fisher') 
+ 
+  # generate a table of results: we can use the GenTable function to generate a summary table with the results from tests applied to the topGOdata object.
+  allGO <- usedGO(GOdata)
+  allRes <- GenTable(GOdata, weightFisher=weight_fisher_result, orderBy='weightFisher',
+                   topNodes=length(allGO))
+  # performing BH correction on our p values
+  p.adj <- round(p.adjust(allRes$weightFisher,method="BH"),digits = 4)
+ 
+  # create the file with all the statistics from GO analysis
+  allRes <- cbind(allRes,p.adj)
+  allRes <- allRes[order(allRes$p.adj),]
+ 
+  #get list of significant GO before multiple testing correction
+  allRes = allRes[which(allRes$p.adj<=0.05),]
+ 
+  write.csv(allRes,
+            paste0("Output/Correlation.genes/IntersectionConsensusNetwork_Feb2025/Subnetwork-",trait,"-GOenrichment-topGO.csv"),
+            row.names = F, quote = T)
+  
+  #Significant genes for each GO term
+  ann.genes<-genesInTerm(GOdata,allRes$GO.ID)
+  sig.genes <- vector("list", length = length(allRes$GO.ID))
+  # Use lapply to loop through the GO.ID values
+  lapply(seq_along(allRes$GO.ID), function(i) {
+    path <- paste0("Output/Correlation.genes/IntersectionConsensusNetwork_Feb2025/GeneLists/", trait, "-",
+                   allRes$Term[i],"-sigGenes.txt")
+    write.table(ann.genes[[allRes$GO.ID[i]]][ann.genes[[allRes$GO.ID[i]]] %in% sub.network.genes[[trait]]],
+                path, col.names = F, row.names = F, quote = F)
+  }
+)
+}
+
+
+```
+
+
+

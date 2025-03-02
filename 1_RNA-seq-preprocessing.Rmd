@@ -1,0 +1,128 @@
+---
+title: "Arabidopsis NxL preprocessing"
+author: "Kithmee de Silva"
+date: "2024-12-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/kithmeedesilva/Documents/Arabidopsis_NxLight/")
+
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(RColorBrewer)
+library(rstatix)
+library(ggpubr)
+
+```
+
+```{r}
+# Expression data - raw counts
+exp.counts <- read.csv("Data/UIUC.rawCounts.combined.csv", row.names = 1, header = TRUE)
+
+# Experimental design
+exp.design<-read.csv("Data/UIUC.design.csv", header = TRUE, row.names = 1)
+#convert light and nitrogen into factors
+exp.design[2:3] <- lapply(exp.design[2:3],factor)
+
+#for DDS the rownames of count file and design should be the same
+exp.counts<-exp.counts[,rownames(exp.design)]
+
+dds <- DESeqDataSetFromMatrix(countData = exp.counts,
+                              colData = exp.design,
+                              design = ~ Nitrogen + Light)
+
+# DESEq count normalization
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+
+# saving normalized counts for gene-trait correlations and visualizations
+normalized_counts <- counts(dds, normalized=TRUE)
+#write.csv(normalized_counts, file="Data/UIUC.normalizedCounts.allGenes.csv", quote=F)
+
+```
+
+
+```{r PCA analysis}
+# running DESeq
+dds <- DESeq(dds)
+vsd <- vst(dds, blind = FALSE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+DESeq2::plotPCA(vsd, intgroup = c("Nitrogen", "Light"), ntop = 500, returnData = T) %>%
+  ggplot(aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = Nitrogen, shape = Light),size = 2.5) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed() +
+  scale_color_manual(values = c("#BDD7E7", "#6BAED6", "#2171B5","midnightblue")) +
+  ggtitle("PCA with VST data") +
+  theme_bw()
+
+# hierarchical clustering of samples
+pr.hc.c <- hclust(dist(t(exp.counts), method = "euclidean"), method = "complete")
+plot(pr.hc.c, main = "Complete", xlab = "", labels = exp.design$grouping)
+
+
+```
+
+```{r, filtering, results=T, warning=F, message=F}
+# ribosomal gene list (to be removed)
+rRNAandVector<-as.character(read.csv("Data/rRNAandVector.csv",header=F)$V1)
+  
+#filtering genes
+exp.groups <- exp.design$grouping
+
+## Filter low reads. Based on those with a median count that is less than 10 across all groups. 
+#determine the median for each set of replicates
+medianCountByGroup = t(apply(exp.counts, 1, tapply, exp.groups, median))
+
+#calculte the max median from all samples for each gene.
+maxMedian <- apply(medianCountByGroup, 1, max)
+
+#remove all genes where no group has a median # of counts of 10 or more
+exp.filt.counts <- exp.counts[maxMedian >= 10,]
+#removing ribosomal genes
+exp.filt.counts <- exp.filt.counts[!rownames(exp.filt.counts) %in% rRNAandVector,]
+
+gene.count.sums <- rowSums(exp.counts)
+# Get the sum of counts for each row after filtering
+filt.gene.count.sums <- rowSums(exp.filt.counts)
+
+xlim.up <- ceiling(log(max(gene.count.sums),2))
+
+color1 <- rgb(173,216,230,max = 255, alpha = 100, names = "lt.blue")
+color2 <- rgb(255,192,203, max = 255, alpha = 100, names = "lt.pink")
+
+hg1 <- hist(log(gene.count.sums,2), breaks=100, plot=FALSE)
+hg2 <- hist(log(filt.gene.count.sums,2),breaks=100, plot=FALSE )
+
+plot(hg1, xlim=c(1,xlim.up), col=color1, main="Counts per gene before/after filtering", xlab="Log2 per Gene Count Sum")
+plot(hg2, col=color2, add=TRUE)
+legend("right", c("Before", "Filtered"), lty=1, lwd=5, col = c(color1, color2), bty="n")
+
+```
+
+
+```{r, filtering, results=T, warning=F, message=F}
+#for DDS the rownames of count file and design should be the same
+dds <- DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                              colData = exp.design,
+                              design = ~ Nitrogen + Light)
+
+# DESEq count normalization
+dds <- estimateSizeFactors(dds)
+
+# saving normalized counts for gene-trait correlations and visualizations
+normalized_counts <- counts(dds, normalized=TRUE)
+
+# saving the filtered gene expression file for downstream analyses
+write.csv(exp.filt.counts, file="Data/exp.filt.counts.csv", quote=F)
+write.csv(normalized_counts, file="Data/exp.filt.normalized.counts.csv", quote=F)
+```
+
+
+
+

@@ -1,0 +1,117 @@
+---
+title: "Arabidopsis NxL GRN construction"
+author: "Kithmee de Silva"
+date: "2025-02-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/kithmeedesilva/Documents/Arabidopsis_NxLight/")
+
+library(GENIE3)
+library(BioNERO)
+
+```
+
+```{r}
+#expression file - normalized filtered counts
+exp.counts <- read.csv("Data/UIUC.normalizedCounts.filtered.csv", row.names = 1)
+
+#design file
+exp.design <- read.csv("Data/UIUC.design.csv", row.names = 1)
+exp.design[2:3] <- lapply(exp.design[2:3],factor)
+
+#TF annotation
+athTFs <- read.csv("Data/Athaliana.TFs.csv", header = T)
+
+# genes to build the network - DEGs
+allDEgenes <- read.csv("Output/UIUC-ModelReductionSigGenes-FC-2023.09.07-thresh.1e-06.csv", header = T)
+
+#filtered expression matrix
+exp.counts <- exp.counts[rownames(exp.counts) %in% allDEgenes$rowname,]
+TFProbeIDs <- intersect(rownames(exp.counts), athTFs$GeneID)
+
+```
+
+```{r}
+set.seed(123) # For reproducibility of results
+
+# ====== GENIE3 network ======
+# k - number of candidate regulators that are randomly selected at each tree node for the best split determination 
+# treeMethod - "RF" random-forest or "ET" extra trees
+weightMat <- GENIE3(as.matrix(exp.counts), regulators = TFProbeIDs, nCores = 4,  treeMethod="RF", verbose=TRUE)
+linkList <- getLinkList(weightMat)
+linkList <- linkList[linkList$weight > 0,]
+names(linkList) = c("TF","Target","Weight")
+write.csv(linkList,"Output/TF-targetNetworks/GENIE3-network-normCounts-DEGfiltered-2025.02.07.csv", 
+          row.names = F, quote = F)
+
+
+# ====== CLR network ======
+clr <- grn_infer(exp.counts, method = "clr", regulators = TFProbeIDs, estimator_clr = "pearson", 
+                 remove_zero = T)
+head(clr)
+write.csv(clr,"Output/TF-targetNetworks/mTERFremoved/CLR-network-normCounts-DEGfiltered-2025.02.07.csv", 
+          row.names = F, quote = F)
+
+# ====== ARACNE network ======
+aracne <- grn_infer(exp.counts, method = "aracne", regulators = TFProbeIDs, estimator_aracne = "spearman", remove_zero = T)
+write.csv(aracne,"Output/TF-targetNetworks/ARACNE-network-normCounts-DEGfiltered-2025.02.07.csv", 
+          row.names = F, quote = F)
+
+```
+
+```{r}
+#saving network files to be validated through ConnecTF 
+# only the top 100,000 edges
+# format: space or Tab separated file with 3 columns: source, edge target. With an optional 4th column of scores
+
+edge <- 100000
+
+#GENIE3
+netout <- linkList[1:edge,]
+netout$edge <- 1
+netout <- netout[,c(1,4,2,3)]
+names(netout) <- c("source","edge","target","score")
+write.table(netout,"Output/TF-targetNetworks/ConnectTF-networks/GENIE3-normCounts-DEGfiltered-2025.02.07.txt",
+          quote = F, row.names = F, sep=" ")
+
+#ARACNE
+netout <- aracne
+netout$edge <- 1
+netout <- netout[,c(1,4,2,3)]
+names(netout) <- c("source","edge","target","score")
+write.table(netout,"Output/TF-targetNetworks/ConnectTF-networks/ARACNE-normCounts-DEGfiltered-2025.02.07.txt",
+          quote = F, row.names = F, sep=" ")
+
+#CLR
+netout <- clr[1:edge,]
+netout$edge <- 1
+netout <- netout[,c(1,4,2,3)]
+names(netout) <- c("source","edge","target","score")
+write.table(netout,"Output/TF-targetNetworks/ConnectTF-networks/CLR-normCounts-DEGfiltered-2025.02.07.txt",
+          quote = F, row.names = F, sep=" ")
+
+```
+
+
+```{r}
+# reformating and saving input files for ConnecTF
+
+OutPredictGRN <- read.csv("Output/TF-targetNetworks/AtNxL.UIUC.FC.09.2023_output_RF_Ksqrt_ntrees300_datatypeSS_LOdataSS_numgenes7762_numtfs574/Ranked_list_TF_gene_best_model.csv")
+OutPredictGRN <- OutPredictGRN[OutPredictGRN$TF != OutPredictGRN$Target,]
+netout <- OutPredictGRN[order(OutPredictGRN$Importance, decreasing = T ),]
+netout <- netout[1:edge,]
+netout$edge <- 1
+netout <- netout[,c(1,4,2,3)]
+names(netout) <- c("source","edge","target","score")
+write.table(netout,"Output/TF-targetNetworks/ConnectTF-networks/OutPredict-NOpriors-normCounts-DEGfiltered-2025.02.07.txt",
+          quote = F, row.names = F, sep=" ")
+
+```
+
+
+
+
+

@@ -1,0 +1,376 @@
+---
+title: "Model Reduction"
+author: "Matthew Brooks"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(DESeq2)
+
+exp.filt.counts <- read.csv("data/exp.filt.counts.csv",header=T, row.names = 1)
+metadata <- read.csv("data/UIUC.design.csv", header = T, row.names = 1)
+
+# simplify the metadata 
+exp.design <- data.frame(N = metadata$Nitrogen, 
+                             L = metadata$Light, 
+                             NxL = metadata$NxL, 
+                             N.L = metadata$N.L, 
+                             row.names = rownames(metadata))
+
+# If you want to treat one or more variables as factors instead of continuous, include this line with list of variables to convert in second position 
+#exp.design <- dplyr::mutate_at(exp.design, c('L','NxL'), factor)
+
+  
+# set adjusted p-value cutoff   
+pval.thresh <- 0.000001
+
+```
+
+```{r 4-factor model, results="hide"}
+## Identify genes fit best by the four factor model
+
+# fit the full 4-factor model
+dds.4model <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                           colData = exp.design,
+                                           design = ~ L + N + NxL + N.L))
+
+#  for each gene use likelihood-ratio test to compare the full model fit to each of the reduced three-factor models, store results in a list
+results.4model.list <- list()
+results.4model.list[['N']] <- results(DESeq(dds.4model, test = 'LRT', reduced = ~ L + NxL + N.L ))
+results.4model.list[['L']] <- results(DESeq(dds.4model, test = 'LRT', reduced = ~ N + NxL + N.L ))
+results.4model.list[['NxL']] <- results(DESeq(dds.4model, test = 'LRT', reduced = ~ N + L + N.L ))
+results.4model.list[['N.L']] <- results(DESeq(dds.4model, test = 'LRT', reduced = ~ N + L + NxL ))
+
+# collect the adjusted p-values from the comparison against each 3-factor model into a single data.frame
+fourmodel.padj <- data.frame(NLNxLN.L_N = results.4model.list[["N"]]$padj,
+                        NLNxLN.L_L = results.4model.list[["L"]]$padj,
+                        NLNxLN.L_NxL=results.4model.list[["NxL"]]$padj,
+                        NLNxLN.L_N.L = results.4model.list[["N.L"]]$padj,
+                        row.names = rownames(results.4model.list[[1]]))
+
+# set any NA values to 1
+fourmodel.padj[is.na(fourmodel.padj[[1]])] <- 1
+
+# select rows in which the full model has a significantly better fit than all three-factor reduced models  
+fourmodel.sig.genes <- fourmodel.padj[apply(fourmodel.padj < pval.thresh , 1, sum) == 4,]
+
+```
+
+```{r 3-factor model pt 1, results="hide"}
+# Identify genes best fit by any of the three-factor models by comparing to the corresponding two-factor models
+
+# create empty lists to fill
+dds.3model.list <- list()
+results.3model.list <- list()
+
+# Compare N + L + NxL to N + NxL, N + L and NxL + L
+dds.3model.list['NLNxL'] <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                         colData = exp.design,
+                                                         design = ~ L + N + NxL))
+results.3model.list[['NLNxL_N']] <- results(DESeq(dds.3model.list[['NLNxL']],
+                                                  test='LRT', reduced = ~ L + NxL ))
+results.3model.list[['NLNxL_L']] <- results(DESeq(dds.3model.list[['NLNxL']],
+                                                  test='LRT', reduced = ~ N + NxL ))
+results.3model.list[['NLNxL_NxL']] <- results(DESeq(dds.3model.list[['NLNxL']],
+                                                    test='LRT', reduced = ~ N + L ))
+
+# Compare N + L + N.L to N + L, N + N.L and L + N.L
+dds.3model.list['NLN.L'] <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                         colData = exp.design,
+                                                         design = ~ N + L + N.L))
+results.3model.list[['NLN.L_N']] <- results(DESeq(dds.3model.list[['NLN.L']],
+                                                  test='LRT', reduced = ~ L + N.L ))
+results.3model.list[['NLN.L_L']] <- results(DESeq(dds.3model.list[['NLN.L']],
+                                                  test='LRT', reduced = ~ N + N.L ))
+results.3model.list[['NLN.L_N.L']] <- results(DESeq(dds.3model.list[['NLN.L']],
+                                                    test='LRT', reduced = ~ N + L ))
+# Compare N + NxL + N.L to N + NxL, N + N.L and NxLv + vN.L
+dds.3model.list['NNxLN.L']<-DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                         colData = exp.design,
+                                                         design = ~ N + NxL + N.L))
+results.3model.list[['NNxLN.L_N']] <- results(DESeq(dds.3model.list[['NNxLN.L']],
+                                                    test='LRT', reduced = ~ NxL + N.L ))
+results.3model.list[['NNxLN.L_NxL']] <- results(DESeq(dds.3model.list[['NNxLN.L']],
+                                                      test='LRT', reduced = ~ N + N.L ))
+results.3model.list[['NNxLN.L_N.L']] <- results(DESeq(dds.3model.list[['NNxLN.L']],
+                                                      test='LRT', reduced = ~ N + NxL )) 
+# Compare L + NxL + N.L to L + NxL, L + N.L and NxL + N.L
+dds.3model.list['LNxLN.L']<-DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                         colData = exp.design,
+                                                         design = ~ L + NxL +N.L))
+results.3model.list[['LNxLN.L_L']] <- results(DESeq(dds.3model.list[['LNxLN.L']],
+                                                    test='LRT', reduced = ~ NxL + N.L ))
+results.3model.list[['LNxLN.L_NxL']] <- results(DESeq(dds.3model.list[['LNxLN.L']],
+                                                      test='LRT', reduced = ~ L + N.L ))
+results.3model.list[['LNxLN.L_N.L']] <- results(DESeq(dds.3model.list[['LNxLN.L']],
+                                                      test='LRT', reduced = ~ L + NxL )) 
+  
+```
+
+```{r 3-factor results}
+
+# create empty data.frame to collect the adjusted p-values from comparisons
+threemodel.padj <- data.frame(matrix(nrow = nrow(exp.filt.counts), 
+                                     ncol = length(results.3model.list)))
+
+colnames(threemodel.padj) <- names(results.3model.list)
+rownames(threemodel.padj) <- rownames(exp.filt.counts)
+
+# collect adjusted p-values for each of the twelve comparisons between the fit of three-factor models to the corresponding two-factor models
+for(col in 1:length(results.3model.list)){
+  threemodel.padj[, col] <- results.3model.list[[col]]$padj
+}
+# set NA values to 1
+threemodel.padj[is.na(threemodel.padj)] <- 1
+
+# create and apply function to check each row and return rows where the fit for  *any* of the three-factor models is  better than the fit for all of the corresponding two-factor models at the p-value cutoff
+threemodsigfunc <- function(row){sum((threemodel.padj[row, 1:3] < pval.thresh)) == 3 | sum((threemodel.padj[row, 4:6] < pval.thresh)) == 3 | sum((threemodel.padj[row, 7:9] < pval.thresh)) == 3 | sum((threemodel.padj[row, 10:12] < pval.thresh)) == 3}
+
+
+threemodel.sig.genes <- threemodel.padj[sapply(1:nrow(threemodel.padj),
+                                               threemodsigfunc),]
+
+  
+#remove genes significant for full model
+threemodel.sig.genes <- threemodel.sig.genes[!rownames(threemodel.sig.genes) %in%  rownames(fourmodel.sig.genes),]
+
+# For the genes that have a best fit for a three-factor model, set the p-values for the non-significant three-factors models to zero.  Only the the three-factor model that has the comparison with the lowest p-value is kept
+for(sigrow in 1:nrow(threemodel.sig.genes)){
+  if(!all(threemodel.sig.genes[sigrow,1:3]<pval.thresh)){threemodel.sig.genes[sigrow,1:3]<-NA}
+  if(!all(threemodel.sig.genes[sigrow,4:6]<pval.thresh)){threemodel.sig.genes[sigrow,4:6]<-NA}
+  if(!all(threemodel.sig.genes[sigrow,7:9]<pval.thresh)){threemodel.sig.genes[sigrow,7:9]<-NA}
+  if(!all(threemodel.sig.genes[sigrow,10:12]<pval.thresh)){threemodel.sig.genes[sigrow,10:12]<-NA}
+  minmodel<-ceiling(which.min(threemodel.sig.genes[sigrow,])/3)
+  threemodel.sig.genes[sigrow,][c(-(minmodel*3-2):-(minmodel*3))]<-NA
+}
+
+
+```
+
+```{r 2-factor model, results="hide"}
+
+# Identify genes best fit by any of the two-factor models by comparing to the corresponding one-factor models
+
+# create empty lists to fill
+dds.2model.list <- list()
+results.2model.list <- list()
+
+
+# Compare N + L to N and L
+dds.2model.list['NL'] <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                      colData = exp.design,
+                                                      design = ~ N + L))
+
+results.2model.list[['NL_N']] <- results(DESeq(dds.2model.list[['NL']], test='LRT',
+                                               reduced = ~ L))
+results.2model.list[['NL_L']] <- results(DESeq(dds.2model.list[['NL']], test='LRT',
+                                               reduced = ~ N))
+# Compare N + NxL to N and NxL
+dds.2model.list['NNxL'] <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                        colData = exp.design,
+                                                        design = ~ N + NxL))
+results.2model.list[['NNxL_N']] <- results(DESeq(dds.2model.list[['NNxL']], test='LRT',
+                                                 reduced = ~ NxL))
+results.2model.list[['NNxL_NxL']] <- results(DESeq(dds.2model.list[['NNxL']], test='LRT',
+                                                   reduced = ~ N))
+
+# Compare N + N.L to N and N.L
+dds.2model.list['NN.L'] <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                        colData = exp.design,
+                                                        design = ~ N + N.L))
+
+results.2model.list[['NN.L_N']] <- results(DESeq(dds.2model.list[['NN.L']], test='LRT',
+                                                 reduced = ~ N.L))
+results.2model.list[['NN.L_N.L']] <- results(DESeq(dds.2model.list[['NN.L']], test='LRT',
+                                                   reduced = ~ N)) 
+
+# Compare L + NxL to L and NxL
+dds.2model.list['LNxL'] <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                        colData = exp.design,
+                                                        design = ~ L + NxL))
+
+results.2model.list[['LNxL_L']] <- results(DESeq(dds.2model.list[['LNxL']], test='LRT',
+                                                 reduced = ~ NxL))
+results.2model.list[['LNxL_NxL']] <- results(DESeq(dds.2model.list[['LNxL']], test='LRT',
+                                                   reduced = ~ L))   
+# Compare L + N.L to L and N.L
+dds.2model.list['LN.L']<-DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                      colData = exp.design,
+                                                      design = ~ L + N.L))
+
+results.2model.list[['LN.L_L']] <- results(DESeq(dds.2model.list[['LN.L']], test='LRT',
+                                                 reduced = ~ N.L))
+results.2model.list[['LN.L_N.L']] <- results(DESeq(dds.2model.list[['LN.L']], test='LRT',
+                                                   reduced = ~ L))
+# Compare NxL + N.L to NxL and N.L
+dds.2model.list['NxLN.L']<-DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                        colData = exp.design,
+                                                        design = ~ NxL + N.L))
+
+results.2model.list[['NxLN.L_NxL']] <- results(DESeq(dds.2model.list[['NxLN.L']], test='LRT',
+                                                     reduced = ~ N.L))
+results.2model.list[['NxLN.L_N.L']] <- results(DESeq(dds.2model.list[['NxLN.L']], test='LRT',
+                                                     reduced = ~ NxL))   
+
+```
+
+
+```{r two model results}
+
+# create empty data.frame to collect the adjusted p-values from comparisons
+twomodel.padj <- data.frame(matrix(nrow = nrow(exp.filt.counts), 
+                                     ncol = length(results.2model.list)))
+
+colnames(twomodel.padj) <- names(results.2model.list)
+rownames(twomodel.padj) <- rownames(exp.filt.counts)
+
+# collect adjusted p-values for each of the twelve comparisons between the fit of three-factor models to the corresponding two-factor models
+for(col in 1:length(results.2model.list)){
+  twomodel.padj[, col] <- results.2model.list[[col]]$padj
+}
+
+
+twomodel.padj[is.na(twomodel.padj)] <- 1
+  
+#function to check each row and return rows where both factors are significant for ANY of the two different two factor models
+twomodsigfunc <- function(x, expname){sum((twomodel.padj[x, 1:2] < pval.thresh)) == 2 | 
+    sum((twomodel.padj[x, 3:4] < pval.thresh)) == 2 | 
+    sum((twomodel.padj[x, 5:6] < pval.thresh)) == 2 | 
+    sum((twomodel.padj[x, 7:8] < pval.thresh)) == 2 | 
+    sum((twomodel.padj[x, 9:10] < pval.thresh)) == 2 | 
+    sum((twomodel.padj[x, 11:12] < pval.thresh)) == 2}  
+  
+twomodel.sig.genes <- twomodel.padj[sapply(1:nrow(twomodel.padj), twomodsigfunc,expname=expname),]
+  
+#remove genes significant for other model lists
+twomodel.sig.genes <- twomodel.sig.genes[!rownames(twomodel.sig.genes)
+                                         %in% rownames(threemodel.sig.genes),]
+twomodel.sig.genes<-twomodel.sig.genes[!rownames(twomodel.sig.genes)
+                                       %in%  rownames(fourmodel.sig.genes),]
+
+# For the genes that have a best fit for a two-factor model, set the p-values for the non-significant two-factor models to zero.  Only the two-factor model that has the comparison with the lowest p-value is kept
+for(sigrow in 1:nrow(twomodel.sig.genes)){
+  if(!all(twomodel.sig.genes[sigrow,1:2] < pval.thresh)){twomodel.sig.genes[sigrow,1:2] <- NA}
+  if(!all(twomodel.sig.genes[sigrow,3:4] < pval.thresh)){twomodel.sig.genes[sigrow,3:4] <- NA}
+  if(!all(twomodel.sig.genes[sigrow,5:6] < pval.thresh)){twomodel.sig.genes[sigrow,5:6] <- NA}
+  if(!all(twomodel.sig.genes[sigrow,7:8] < pval.thresh)){twomodel.sig.genes[sigrow,7:8] <- NA}
+  if(!all(twomodel.sig.genes[sigrow,9:10] < pval.thresh)){twomodel.sig.genes[sigrow,9:10] <- NA}
+  if(!all(twomodel.sig.genes[sigrow,11:12] < pval.thresh)){twomodel.sig.genes[sigrow,11:12] <- NA}
+  minmodel<-ceiling(which.min(twomodel.sig.genes[sigrow,])/2)
+  twomodel.sig.genes[sigrow,][c(-(minmodel*2-1), -(minmodel*2))] <- NA
+  }
+
+```
+
+```{r one-model}
+# Identify genes best fit by any of the one-factor models by comparing to the null model
+
+# create empty lists to fill
+dds.1model.list <- list()
+results.1model.list <- list()
+
+
+# compare N to null
+dds.1model.list['N'] <- DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                     colData = exp.design,
+                                                     design = ~ N))
+results.1model.list[['N_L']] <- results(DESeq(dds.1model.list[['N']], test='LRT',
+                                            reduced = ~ 1 ))
+
+# compare L to null
+dds.1model.list['L']<-DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                   colData = exp.design,
+                                                   design = ~ L))
+results.1model.list[['L_L']] <- results(DESeq(dds.1model.list[['L']], test='LRT',
+                                            reduced = ~ 1 ))
+
+# compare NxL to null
+dds.1model.list['NxL']<-DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                     colData = exp.design,
+                                                     design = ~ NxL))
+results.1model.list[['NxL_NxL']] <- results(DESeq(dds.1model.list[['NxL']], test='LRT',
+                                              reduced = ~ 1 ))
+
+# compare N.L to null
+dds.1model.list['N.L']<-DESeq(DESeqDataSetFromMatrix(countData = exp.filt.counts,
+                                                     colData = exp.design,
+                                                     design = ~ N.L))
+results.1model.list[['N.L_N.L']] <- results(DESeq(dds.1model.list[['N.L']], test='LRT',
+                                              reduced = ~ 1 ))
+
+```
+
+```{r one-factor results}
+# create empty data.frame to collect the adjusted p-values from comparisons
+onemodel.padj <- data.frame(matrix(nrow = nrow(exp.filt.counts), 
+                                     ncol = length(results.1model.list)))
+
+colnames(onemodel.padj) <- names(results.1model.list)
+rownames(onemodel.padj) <- rownames(exp.filt.counts)
+
+# collect adjusted p-values for each of the twelve comparisons between the fit of one-factor model to the corresponding null model
+for(col in 1:length(results.1model.list)){
+  onemodel.padj[, col] <- results.1model.list[[col]]$padj
+}
+
+# set NA values to 1 
+onemodel.padj[is.na(onemodel.padj)] <- 1
+
+# select all the genes where at least one adjusted p-value is below the threshold
+onemodel.sig.genes <- onemodel.padj[apply(onemodel.padj < pval.thresh, 1, sum) > 0, ]
+
+
+#remove genes significant for other model lists
+onemodel.sig.genes <- onemodel.sig.genes[!rownames(onemodel.sig.genes)
+                                         %in% rownames(twomodel.sig.genes), ]
+onemodel.sig.genes <- onemodel.sig.genes[!rownames(onemodel.sig.genes)
+                                         %in% rownames(threemodel.sig.genes), ]
+onemodel.sig.genes <- onemodel.sig.genes[!rownames(onemodel.sig.genes)
+                                         %in% rownames(fourmodel.sig.genes), ]
+
+# if more than one single term passes the cutoff, choose the one with the lowest p-value compared to corresponding null model
+for(sigrow in 1:nrow(onemodel.sig.genes)){
+ onemodel.sig.genes[sigrow, -which.min(onemodel.sig.genes[sigrow,])] <- NA
+  }
+
+```
+
+```{r}
+# Create a summary table that has the model in the first column and the adjusted p-values for each term (the p-value when you remove that term) in the remaining columns 
+
+# Create an empty data.frame with rownames corresponding to total number of significant genes and columns for N, L, NxL and N.L
+nmodel = nrow(threemodel.sig.genes) + nrow(fourmodel.sig.genes) +
+  nrow(twomodel.sig.genes) + nrow(onemodel.sig.genes)
+model.summary <- data.frame(Model = rep(NA, nmodel), N = rep(NA, nmodel),
+                                 L = rep(NA, nmodel), NxL = rep(NA, nmodel),
+                                 N.L = rep(NA, nmodel),
+                            row.names = c(rownames(fourmodel.sig.genes),
+                                          rownames(threemodel.sig.genes),
+                                          rownames(twomodel.sig.genes),
+                                          rownames(onemodel.sig.genes)))
+
+# function to parse the tables for four-, three-, two- and one-model significant genes to a common format
+parsemodel <- function(row){
+  output <- data.frame(Model = NA, N = NA, L = NA, NxL = NA, N.L = NA)
+  rowsigcols <- dplyr::select(row, !where(anyNA))
+  output["Model"] <- stringr::str_split_i(colnames(rowsigcols), "_", 1)[1]
+  stringr::str_split_i(colnames(dplyr::select(row, !where(anyNA))),
+                        "_", 2) -> colnames(rowsigcols) 
+  for(sig.col in colnames(rowsigcols)){
+    output[sig.col] <- rowsigcols[[sig.col]]
+  }
+  return(output)
+}
+
+# apply the function and fill in the model.summary table
+for(row in rownames(model.summary)){
+  model.summary[row,] <- parsemodel(dplyr::bind_rows(fourmodel.sig.genes,
+                                                      threemodel.sig.genes,
+                                                      twomodel.sig.genes,
+                                                      onemodel.sig.genes)[row,])
+}
+
+# write the output
+write.csv(model.summary, "model.reduction.summary.csv")
+```
